@@ -1,0 +1,638 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Webapplication for Connect Management
+Parameters:
+  SolutionSourceBucket:
+    Type: String
+    Description: Bucket which has the code
+    Default: asset-bucket-mani
+
+  PromptEventTable:
+    Type: String
+    Description: Table to hold the Prompt event logs
+    Default: cn-connect-mngr-prompts-event-logs
+
+  TrainingDbTableName:
+    Type: String
+    Description: Table to hold the details of traning Instance
+    Default: cn-connect-mngr-training-instance-arn-data
+
+  AssetsDbTableName:
+    Type: String
+    Description: Table to hold the details of Asset Instance
+    Default: cn-connect-mngr-Asset-instance-arn-data
+
+  LambdaRoleARN:
+    Type: String
+    Description: ARN of IAM role for lambda
+
+  FlowEventTable:
+    Type: String
+    Description: Table to hold the flow event logs
+    Default: cn-connect-mngr-flows-event-logs
+
+  ConnectArnTableName:
+    Type: String
+    Description: Table to hold the flow event logs
+    Default: cn-connect-mngr-arns
+
+Outputs:
+  PromptsBucketOutput:
+    Description: Bucket details for prompts storage
+    Value: PromptsBucketName
+
+Resources:-
+  #######################
+  # Dynamodb Table 
+  #######################
+  promptEventTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: requestId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: requestId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Ref PromptEventTable
+
+  flowEventTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: requestId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: requestId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Ref FlowEventTable
+
+  TrainingDbTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Ref TrainingDbTableName
+
+  AssetsDbTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Ref AssetsDbTableName
+
+  connectArnTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Ref ConnectArnTableName
+
+  #######################
+  # Cognito
+  #######################
+  promptUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-${AWS::AccountId}-user-pool
+      AutoVerifiedAttributes:
+        - email
+      AdminCreateUserConfig:
+        InviteMessageTemplate:
+          EmailMessage: Your username is {username} and password is {####}
+  promptUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${AWS::StackName}-${AWS::AccountId}-client
+      GenerateSecret: false
+      UserPoolId: !Ref promptUserPool
+  promptIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub ${AWS::StackName}-${AWS::AccountId}-identity-pool
+      AllowUnauthenticatedIdentities: true
+      CognitoIdentityProviders:
+        - ClientId: !Ref promptUserPoolClient
+          ProviderName: !GetAtt promptUserPool.ProviderName
+
+  #######################
+  # Serverless API
+  #######################
+  promptSecureApi:
+    Type: AWS::Serverless::Api
+    DependsOn: promptS3ListUrl
+    Properties:
+      Name: !Sub ${AWS::StackName}-${AWS::AccountId}-secure-api
+      StageName: Prod
+      Auth:
+        Authorizers:
+          MyCognitoAuth:
+            UserPoolArn: !GetAtt promptUserPool.Arn
+            AuthType: COGNITO_USER_POOLS
+        DefaultAuthorizer: MyCognitoAuth
+        AddDefaultAuthorizerToCorsPreflight: false
+      Cors:
+        AllowMethods: '''POST, GET, DELETE'''
+        AllowHeaders: '''*'''
+        MaxAge: '''60000'''
+      BinaryMediaTypes:
+        - audio~1x-wav
+  promptPublicApi:
+    Type: AWS::Serverless::Api
+    DependsOn: promptS3ListUrl
+    Properties:
+      Name: !Sub ${AWS::StackName}-${AWS::AccountId}-public-api
+      StageName: Public
+      Cors:
+        AllowMethods: '''POST, GET, DELETE'''
+        AllowHeaders: '''*'''
+        MaxAge: '''60000'''
+      BinaryMediaTypes:
+        - audio~1x-wav
+  #######################
+  # LAMBDA , Roles -- Depends on CopyCfnStacksLambdaTrigger to copy source zip
+  #######################
+  promptS3ListUrl:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-promptS3ListUrl
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: promptS3ListUrl.zip
+      Handler: src/handlers/s3Prompts.getPrompts
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: promptS3ListUrl
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /prompts/list
+            Method: GET
+            RestApiId: !Ref promptPublicApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref promptEventTable
+  promptDownloadUrl:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-promptDownloadUrl
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: promptDownloadUrl.zip
+      Handler: src/handlers/s3PresignedUrl.getPresignedUrl
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: promptDownloadUrl
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /prompts/getPresignedUrl
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref promptEventTable
+  promptDeleteUrl:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-promptDeleteUrl
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: promptDeleteUrl.zip
+      Handler: src/handlers/s3PromptDelete.deletePrompt
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: promptDeleteUrl
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /prompts/delete
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref promptEventTable
+  promptUploadUrl:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-promptUploadUrl
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: promptUploadUrl.zip
+      Handler: src/handlers/s3Upload.uploadFile
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: promptUploadUrl
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /prompts/upload
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref promptEventTable
+  promptConfigUrl:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-promptConfigUrl
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: promptConfigUrl.zip
+      Handler: src/handlers/config.getConfig
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: promptConfigUrl
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /prompts/config
+            Method: GET
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          CognitoPool: !Ref promptUserPoolClient
+          UserPool: !Ref promptUserPool
+          PromptIdentityPool: !Ref promptIdentityPool
+  promptEventLogFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-promptAuditFn
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: promptAuditFn.zip
+      Handler: src/handlers/s3PromptEventLog.getS3PromptEventLog
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: promptEventLogFunction
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /prompts/event
+            Method: GET
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref promptEventTable
+
+  #using the new module bucket and table name 
+
+  listInstanceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-listInstancefn
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: listInstancefn.zip
+      Handler: src/listInstance.listInstance
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: list instance function
+      Role: !Ref LambdaRoleARN # need to upate as FlowLambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /connect/listinstance
+            Method: GET
+            RestApiId: !Ref promptSecureApi
+
+  listContactFlowsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-cfList
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: cfList.zip
+      Handler: src/contactFlowList.contactFlowList
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: contact flow list function
+      Role: !Ref LambdaRoleARN # need to upate as FlowLambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /flows/list
+            Method: GET
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref flowEventTable
+
+  listContactModuleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-cmList
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: cmList.zip
+      Handler: src/contactModuleList.contactModuleList
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: contact Module list function
+      Role: !Ref LambdaRoleARN # need to upate as FlowLambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /modules/list
+            Method: GET
+            RestApiId: !Ref promptSecureApi
+
+  #using the same flow bucket and table name
+  describeContactFlowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-describeCf
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: describeCf.zip
+      Handler: src/describeContactFlow.describeContactFlow
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Describe contact flow function
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /flows/describe
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref flowEventTable
+
+  describeContactModuleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-describeCm
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: describeCm.zip
+      Handler: src/describeContactModule.describeContactModule
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Describe contact Module function
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /modules/describe
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref flowEventTable
+
+  createContactFlowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-createCf
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: createCf.zip
+      Handler: src/createcontactFlow.createcontactFlow
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: create contact flow function
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /flows/create
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref flowEventTable
+
+  createContactFlowModuleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-createModule
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: createModule.zip
+      Handler: src/createcontactFlowModule.createcontactFlowModule
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: create contact flow Module function
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /modules/create
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref flowEventTable
+
+  MigrateContactFlowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-migratecf
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: migratecf.zip
+      Handler: src/migrateContactFlow.migrateContactFlow
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Migrate contact flow Module function
+      Role: !Ref LambdaRoleARN # need to upate as FlowLambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /migrate
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref flowEventTable
+
+  UpdateConnectArnFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-UpdateArns
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: UpdateArns.zip
+      Handler: src/updateArn.updateArn
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Migrate contact flow Module function
+      Role: !Ref LambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /update/arn
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref flowEventTable
+
+  MigrateContactModuleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-migratecm
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: migratecm.zip
+      Handler: src/migrateContactModule.migrateContactModule
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: Migrate contact Module function
+      Role: !Ref LambdaRoleARN # need to upate as FlowLambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /migrate/module
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref flowEventTable
+
+  listQueueFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-${AWS::AccountId}-listqueue
+      CodeUri:
+        Bucket: !Ref SolutionSourceBucket
+        Key: listqueue.zip
+      Handler: src/listQueue.listQueue
+      Runtime: nodejs20.x
+      Architectures:
+        - x86_64
+      MemorySize: 128
+      Timeout: 100
+      Description: List queue function
+      Role: !Ref LambdaRoleARN # need to upate as FlowLambdaRoleARN
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /flows/queue
+            Method: POST
+            RestApiId: !Ref promptSecureApi
+      Environment:
+        Variables:
+          BucketName: !Ref SolutionSourceBucket
+          Region: !Sub ${AWS::Region}
+          EventTable: !Ref flowEventTable
+
+# this is a module , but using the flow bucket name and table

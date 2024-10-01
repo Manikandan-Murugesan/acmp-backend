@@ -1,0 +1,5 @@
+sam package --template-file C:\Users\m.p.murugesan\Videocall-asset\template.yml --s3-bucket asset-bucket-mani --output-template-file packaged.yaml
+
+
+
+sam deploy --template-file  C:\Users\m.p.murugesan\packaged.yaml --stack-name Asset-Stack --capabilities CAPABILITY_IAM --parameter-overrides LambdaRoleARN=arn:aws:iam::626635404992:role/Asset-role-policy
